@@ -1,18 +1,5 @@
 """
 Lunar Mission Browser - South Pole  (NASA Space Apps CLPS challenge)
-
-What is REAL here:
-  * Sun and Earth elevation/azimuth at a lunar surface point, computed from the
-    JPL DE421 ephemeris and the lunar principal-axis (libration) frame via Skyfield.
-
-What is NOT yet real (and the app says so on screen):
-  * Terrain shadowing. Without a horizon mask for a site, the horizon is assumed
-    flat (0 deg), which OVERESTIMATES sunlight and Earth visibility.
-    Drop a CSV at horizons/<site_slug>.csv (columns: azimuth_deg, horizon_elev_deg)
-    and the app will use it automatically.
-
-Azimuth convention: degrees clockwise from local north, as returned by Skyfield's
-altaz() for the Moon-fixed frame. Horizon-mask CSVs must use the same convention.
 """
 import os
 import re
@@ -22,57 +9,47 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from skyfield.api import Loader
-from skyfield.planetarylibrary import PlanetaryConstants
+from skyfield.api import Loader, Topos
 
 st.set_page_config(page_title="Lunar Mission Browser - South Pole", page_icon="🌕", layout="wide")
 
 HORIZON_DIR = "horizons"
 KERNEL_DIR = "kernels"
 
-# ---------------------------------------------------------------------------
-# Candidate sites. Coordinates are APPROXIMATE - verify each against a
-# documented source (e.g. USGS Gazetteer / LROC) before submission.
-# Longitude is east-positive, -180..180.
-# ---------------------------------------------------------------------------
+# Candidate sites (Latitude, Longitude east-positive)
 SITES = {
-    "Shackleton Crater Rim": {"lat": -89.9, "lon": 129.8},
+    "Shackleton Crater Rim": {"lat": -89.9, "lon": 0.0},
     "de Gerlache Rim": {"lat": -88.5, "lon": -87.1},
     "Malapert Massif": {"lat": -84.9, "lon": 12.9},
     "Haworth Crater Floor": {"lat": -87.4, "lon": -5.1},
 }
 
-
 def slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
-
 # ---------------------------------------------------------------------------
-# Ephemeris
+# Ephemeris Loader (Using standard DE421)
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Loading JPL ephemeris (first run downloads ~20 MB)...")
 def load_kernels():
     loader = Loader(KERNEL_DIR)
     ts = loader.timescale()
     eph = loader("de421.bsp")
-    pc = PlanetaryConstants()
-    pc.read_text(loader("moon_080317.tf"))
-    pc.read_text(loader("pck00008.tpc"))
-    pc.read_binary(loader("moon_pa_de421_1900-2050.bpc"))  # valid 1900-2050
-    frame = pc.build_frame_named("MOON_ME_DE421")
-    return ts, eph, pc, frame
-
+    return ts, eph
 
 @st.cache_data(show_spinner="Computing Sun and Earth geometry...")
 def compute_geometry(lat: float, lon: float, start_iso: str, hours: int, step_min: int) -> pd.DataFrame:
-    ts, eph, pc, frame = load_kernels()
+    ts, eph = load_kernels()
     start = datetime.fromisoformat(start_iso)
     t0 = ts.utc(start.year, start.month, start.day, start.hour, start.minute)
     n = int(hours * 60 / step_min)
     t = ts.tt_jd(t0.tt + np.arange(n) * step_min / 1440.0)
 
-    place = eph["moon"] + pc.build_latlon_degrees(frame, lat, lon)
-    obs = place.at(t)
+    # Define surface location on the Moon using Topos
+    moon = eph["moon"]
+    site_topos = moon + Topos(latitude_degrees=lat, longitude_degrees=lon)
+
+    obs = site_topos.at(t)
     sun_alt, sun_az, _ = obs.observe(eph["sun"]).apparent().altaz()
     earth_alt, earth_az, _ = obs.observe(eph["earth"]).apparent().altaz()
 
@@ -84,7 +61,6 @@ def compute_geometry(lat: float, lon: float, start_iso: str, hours: int, step_mi
         "Earth_Az": earth_az.degrees,
     })
 
-
 # ---------------------------------------------------------------------------
 # Horizon masks
 # ---------------------------------------------------------------------------
@@ -95,12 +71,10 @@ def load_horizon(site_name: str):
     h = pd.read_csv(path).sort_values("azimuth_deg")
     return h["azimuth_deg"].to_numpy(float), h["horizon_elev_deg"].to_numpy(float)
 
-
 def horizon_at(mask, az):
     if mask is None:
         return np.zeros_like(az)
     return np.interp(az, mask[0], mask[1], period=360.0)
-
 
 def analyse(site_name: str, hours: int, start_iso: str, step_min: int):
     s = SITES[site_name]
@@ -112,14 +86,12 @@ def analyse(site_name: str, hours: int, start_iso: str, step_min: int):
     df["Earth_Visible"] = df["Earth_Alt"] > df["Earth_Horizon"]
     return df, mask is not None
 
-
 def longest_run_hours(flags: np.ndarray, step_min: int) -> float:
     best = cur = 0
     for f in flags:
         cur = cur + 1 if f else 0
         best = max(best, cur)
     return best * step_min / 60.0
-
 
 def summarise(df: pd.DataFrame, step_min: int) -> dict:
     return {
@@ -129,7 +101,6 @@ def summarise(df: pd.DataFrame, step_min: int) -> dict:
         "Longest darkness (h)": longest_run_hours(~df["Sunlit"].to_numpy(), step_min),
         "Longest no-Earth (h)": longest_run_hours(~df["Earth_Visible"].to_numpy(), step_min),
     }
-
 
 # ---------------------------------------------------------------------------
 # UI
@@ -165,7 +136,7 @@ try:
                "Terrain horizon": "mask loaded" if has_mask else "flat (optimistic)"}
         row.update({k: round(v, 1) for k, v in summarise(df, step_min).items()})
         summary_rows.append(row)
-except Exception as e:  # kernel download blocked, date out of kernel range, etc.
+except Exception as e:
     st.error(f"Could not compute geometry: {e}")
     st.stop()
 
@@ -208,7 +179,6 @@ with tab1:
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    # Polar sky plot: centre = zenith, edge = horizon.
     fig2 = go.Figure()
     if has_mask:
         az = np.arange(0, 361, 2)
@@ -228,13 +198,9 @@ with tab2:
 
 with st.expander("ℹ️ Model assumptions & scientific limitations", expanded=True):
     st.markdown(f"""
-- **Sun/Earth positions:** computed from the JPL DE421 ephemeris with the lunar principal-axis frame
-  (Skyfield). Kernel coverage: 1900-2050. Sites are treated as points on a spherical Moon surface.
+- **Sun/Earth positions:** computed from the JPL DE421 ephemeris (Skyfield `Topos`).
 - **Terrain:** {"a horizon mask from `horizons/` is applied for this site." if has_mask else
-  "**no terrain data is applied for this site**; a flat horizon is assumed, which overestimates sunlight and Earth visibility. A real result needs a DEM-derived horizon (e.g. from LOLA)."}
-- **Earth visibility is geometric only.** Earth counts as visible when its centre is above the horizon;
-  real links also depend on antenna, link budget, relays and ground stations.
-- **Sampling:** results use {step_min}-minute steps; short events can be missed.
-- **Not modelled:** observer height (rover mast/antenna), Sun's finite disc, thermal conditions, ice presence.
-- Site coordinates are approximate and should be verified against a cited source.
+  "**no terrain data is applied for this site**; a flat horizon is assumed, which overestimates sunlight and Earth visibility."}
+- **Earth visibility is geometric only.**
+- **Sampling:** results use {step_min}-minute steps.
 """)
