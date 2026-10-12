@@ -1,91 +1,240 @@
-import streamlit as st
+"""
+Lunar Mission Browser - South Pole  (NASA Space Apps CLPS challenge)
+
+What is REAL here:
+  * Sun and Earth elevation/azimuth at a lunar surface point, computed from the
+    JPL DE421 ephemeris and the lunar principal-axis (libration) frame via Skyfield.
+
+What is NOT yet real (and the app says so on screen):
+  * Terrain shadowing. Without a horizon mask for a site, the horizon is assumed
+    flat (0 deg), which OVERESTIMATES sunlight and Earth visibility.
+    Drop a CSV at horizons/<site_slug>.csv (columns: azimuth_deg, horizon_elev_deg)
+    and the app will use it automatically.
+
+Azimuth convention: degrees clockwise from local north, as returned by Skyfield's
+altaz() for the Moon-fixed frame. Horizon-mask CSVs must use the same convention.
+"""
+import os
+import re
+from datetime import datetime, date, time
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import streamlit as st
+from skyfield.api import Loader
+from skyfield.planetarylibrary import PlanetaryConstants
 
-# Page Configuration
 st.set_page_config(page_title="Lunar Mission Browser - South Pole", page_icon="🌕", layout="wide")
 
-st.title("🌕 Lunar Mission Browser - South Pole")
-st.markdown("Select a candidate landing site and time range to evaluate solar power availability and direct-to-Earth communication windows.")
+HORIZON_DIR = "horizons"
+KERNEL_DIR = "kernels"
 
-# 1. Landing Site Metadata (South Pole Coordinates)
+# ---------------------------------------------------------------------------
+# Candidate sites. Coordinates are APPROXIMATE - verify each against a
+# documented source (e.g. USGS Gazetteer / LROC) before submission.
+# Longitude is east-positive, -180..180.
+# ---------------------------------------------------------------------------
 SITES = {
-    "Shackleton Crater Rim": {"lat": -89.9, "lon": 0.0, "base_illumination": 0.82},
-    "de Gerlache Ridge": {"lat": -88.5, "lon": -87.1, "base_illumination": 0.75},
-    "Malapert Mountain": {"lat": -84.9, "lon": 12.9, "base_illumination": 0.88},
-    "Haworth Crater Floor (PSR)": {"lat": -87.4, "lon": -5.1, "base_illumination": 0.05}
+    "Shackleton Crater Rim": {"lat": -89.9, "lon": 129.8},
+    "de Gerlache Rim": {"lat": -88.5, "lon": -87.1},
+    "Malapert Massif": {"lat": -84.9, "lon": 12.9},
+    "Haworth Crater Floor": {"lat": -87.4, "lon": -5.1},
 }
 
-# Sidebar Controls
-st.sidebar.header("Mission Parameters")
-selected_site = st.sidebar.selectbox("Choose Landing Crater / Site:", list(SITES.keys()))
-duration_hours = st.sidebar.slider("Mission Window (Hours):", min_value=24, max_value=708, value=168, step=24)
 
-# 2. Lunar Geometry & Ephemeris Simulation Engine
-def calculate_lunar_geometry(site_name, hours):
-    time_steps = np.arange(0, hours, 1)
-    solar_period = 708.0
-    site_info = SITES[site_name]
-    
-    solar_elevation = 1.5 * np.sin(2 * np.pi * time_steps / solar_period) + (site_info["base_illumination"] * 2.0 - 1.0)
-    earth_elevation = 4.0 * np.sin(2 * np.pi * time_steps / 655.7) + 2.5
-    
-    df = pd.DataFrame({
-        "Hour": time_steps,
-        "Solar_Elevation_Deg": solar_elevation,
-        "Earth_Elevation_Deg": earth_elevation,
-        "Sunlit": solar_elevation > 0,
-        "Earth_Visible": earth_elevation > 0
+def slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+# ---------------------------------------------------------------------------
+# Ephemeris
+# ---------------------------------------------------------------------------
+@st.cache_resource(show_spinner="Loading JPL ephemeris (first run downloads ~20 MB)...")
+def load_kernels():
+    loader = Loader(KERNEL_DIR)
+    ts = loader.timescale()
+    eph = loader("de421.bsp")
+    pc = PlanetaryConstants()
+    pc.read_text(loader("moon_080317.tf"))
+    pc.read_text(loader("pck00008.tpc"))
+    pc.read_binary(loader("moon_pa_de421_1900-2050.bpc"))  # valid 1900-2050
+    frame = pc.build_frame_named("MOON_ME_DE421")
+    return ts, eph, pc, frame
+
+
+@st.cache_data(show_spinner="Computing Sun and Earth geometry...")
+def compute_geometry(lat: float, lon: float, start_iso: str, hours: int, step_min: int) -> pd.DataFrame:
+    ts, eph, pc, frame = load_kernels()
+    start = datetime.fromisoformat(start_iso)
+    t0 = ts.utc(start.year, start.month, start.day, start.hour, start.minute)
+    n = int(hours * 60 / step_min)
+    t = ts.tt_jd(t0.tt + np.arange(n) * step_min / 1440.0)
+
+    place = eph["moon"] + pc.build_latlon_degrees(frame, lat, lon)
+    obs = place.at(t)
+    sun_alt, sun_az, _ = obs.observe(eph["sun"]).apparent().altaz()
+    earth_alt, earth_az, _ = obs.observe(eph["earth"]).apparent().altaz()
+
+    return pd.DataFrame({
+        "Time_UTC": pd.to_datetime(t.utc_datetime()).tz_localize(None),
+        "Sun_Alt": sun_alt.degrees,
+        "Sun_Az": sun_az.degrees,
+        "Earth_Alt": earth_alt.degrees,
+        "Earth_Az": earth_az.degrees,
     })
-    return df
 
-data = calculate_lunar_geometry(selected_site, duration_hours)
 
-sunlight_pct = (data["Sunlit"].sum() / len(data)) * 100
-comms_pct = (data["Earth_Visible"].sum() / len(data)) * 100
+# ---------------------------------------------------------------------------
+# Horizon masks
+# ---------------------------------------------------------------------------
+def load_horizon(site_name: str):
+    path = os.path.join(HORIZON_DIR, f"{slug(site_name)}.csv")
+    if not os.path.exists(path):
+        return None
+    h = pd.read_csv(path).sort_values("azimuth_deg")
+    return h["azimuth_deg"].to_numpy(float), h["horizon_elev_deg"].to_numpy(float)
 
-# Top Metrics Display
-col1, col2, col3 = st.columns(3)
-col1.metric("Sunlight Availability", f"{sunlight_pct:.1f}%", delta="Solar Power Potential")
-col2.metric("Earth Direct Line-of-Sight", f"{comms_pct:.1f}%", delta="DTE Comms Window")
-col3.metric("Target Site Lat / Lon", f"{SITES[selected_site]['lat']}°, {SITES[selected_site]['lon']}°")
 
-st.markdown("---")
+def horizon_at(mask, az):
+    if mask is None:
+        return np.zeros_like(az)
+    return np.interp(az, mask[0], mask[1], period=360.0)
 
-# Interactive Plotly Charts
-st.subheader("📊 Horizon Elevation Profiles (Sun & Earth)")
 
-fig = go.Figure()
-fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Lunar Horizon (0°)")
+def analyse(site_name: str, hours: int, start_iso: str, step_min: int):
+    s = SITES[site_name]
+    df = compute_geometry(s["lat"], s["lon"], start_iso, hours, step_min)
+    mask = load_horizon(site_name)
+    df["Sun_Horizon"] = horizon_at(mask, df["Sun_Az"].to_numpy())
+    df["Earth_Horizon"] = horizon_at(mask, df["Earth_Az"].to_numpy())
+    df["Sunlit"] = df["Sun_Alt"] > df["Sun_Horizon"]
+    df["Earth_Visible"] = df["Earth_Alt"] > df["Earth_Horizon"]
+    return df, mask is not None
 
-fig.add_trace(go.Scatter(
-    x=data["Hour"], y=data["Solar_Elevation_Deg"],
-    mode='lines', name='Solar Elevation (°)',
-    line=dict(color='#FFD700', width=2),
-    fill='tozeroy'
-))
 
-fig.add_trace(go.Scatter(
-    x=data["Hour"], y=data["Earth_Elevation_Deg"],
-    mode='lines', name='Earth Elevation (°)',
-    line=dict(color='#1E90FF', width=2)
-))
+def longest_run_hours(flags: np.ndarray, step_min: int) -> float:
+    best = cur = 0
+    for f in flags:
+        cur = cur + 1 if f else 0
+        best = max(best, cur)
+    return best * step_min / 60.0
 
-fig.update_layout(
-    xaxis_title="Mission Elapsed Time (Hours)",
-    yaxis_title="Elevation Angle Above Horizon (Degrees)",
-    hovermode="x unified",
-    template="plotly_dark",
-    height=400
+
+def summarise(df: pd.DataFrame, step_min: int) -> dict:
+    return {
+        "Sunlit %": 100 * df["Sunlit"].mean(),
+        "Earth visible %": 100 * df["Earth_Visible"].mean(),
+        "Sun AND Earth %": 100 * (df["Sunlit"] & df["Earth_Visible"]).mean(),
+        "Longest darkness (h)": longest_run_hours(~df["Sunlit"].to_numpy(), step_min),
+        "Longest no-Earth (h)": longest_run_hours(~df["Earth_Visible"].to_numpy(), step_min),
+    }
+
+
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
+st.title("🌕 Lunar Mission Browser - South Pole")
+st.markdown(
+    "Compare candidate landing sites and dates: where the **Sun** and **Earth** sit relative "
+    "to the local horizon, for power generation and direct-to-Earth (DTE) communication windows."
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.sidebar.header("Mission Parameters")
+chosen = st.sidebar.multiselect("Candidate sites", list(SITES), default=list(SITES)[:2])
+start_date = st.sidebar.date_input("Start date (UTC)", value=date(2026, 12, 1),
+                                   min_value=date(1990, 1, 1), max_value=date(2049, 12, 31))
+start_hour = st.sidebar.slider("Start hour (UTC)", 0, 23, 0)
+duration_hours = st.sidebar.slider("Window (hours)", 24, 720, 708, step=24,
+                                   help="~708 h is one lunar day-night cycle (synodic month, ~29.5 d).")
+step_min = st.sidebar.select_slider("Time step (minutes)", options=[10, 15, 30, 60], value=30,
+                                    help="Coarse steps can miss short illumination or darkness intervals.")
 
-# Scientific Disclosures
-with st.expander("ℹ️ Model Assumptions & Scientific Limitations"):
-    st.markdown("""
-    - **Data Source:** Model uses geometric horizon limits derived from NASA LRO LOLA DEM datasets.
-    - **Local Terrain:** Local crater rims or ridges below DEM spatial resolution may cause micro-shadows.
-    - **Operational Visibility:** Earth geometric line-of-sight does not guarantee radio link budget without proper antenna power/orientation.
-    """)
+if not chosen:
+    st.info("Pick at least one site in the sidebar.")
+    st.stop()
+
+start_iso = datetime.combine(start_date, time(start_hour)).isoformat()
+
+results, summary_rows = {}, []
+try:
+    for name in chosen:
+        df, has_mask = analyse(name, duration_hours, start_iso, step_min)
+        results[name] = (df, has_mask)
+        row = {"Site": name, "Lat/Lon": f"{SITES[name]['lat']}, {SITES[name]['lon']}",
+               "Terrain horizon": "mask loaded" if has_mask else "flat (optimistic)"}
+        row.update({k: round(v, 1) for k, v in summarise(df, step_min).items()})
+        summary_rows.append(row)
+except Exception as e:  # kernel download blocked, date out of kernel range, etc.
+    st.error(f"Could not compute geometry: {e}")
+    st.stop()
+
+if any(not m for _, m in results.values()):
+    st.warning(
+        "Some sites have **no terrain horizon mask**, so a flat 0° horizon is assumed. "
+        "Sunlight and Earth-visibility values for those sites are **upper bounds**, not predictions."
+    )
+
+st.subheader("Site comparison")
+st.dataframe(pd.DataFrame(summary_rows).set_index("Site"), use_container_width=True)
+
+st.markdown("---")
+focus = st.selectbox("Inspect site", chosen)
+df, has_mask = results[focus]
+m = summarise(df, step_min)
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Sunlit", f"{m['Sunlit %']:.1f}%")
+c2.metric("Earth geometrically visible", f"{m['Earth visible %']:.1f}%")
+c3.metric("Longest darkness", f"{m['Longest darkness (h)']:.0f} h")
+c4.metric("Sun + Earth together", f"{m['Sun AND Earth %']:.1f}%")
+
+tab1, tab2 = st.tabs(["Elevation vs time", "Sky view (azimuth / elevation)"])
+
+with tab1:
+    fig = go.Figure()
+    fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Flat horizon (0°)")
+    fig.add_trace(go.Scatter(x=df["Time_UTC"], y=df["Sun_Alt"], name="Sun elevation",
+                             line=dict(color="#FFD700", width=2)))
+    fig.add_trace(go.Scatter(x=df["Time_UTC"], y=df["Earth_Alt"], name="Earth elevation",
+                             line=dict(color="#1E90FF", width=2)))
+    if has_mask:
+        fig.add_trace(go.Scatter(x=df["Time_UTC"], y=df["Sun_Horizon"], name="Terrain horizon toward Sun",
+                                 line=dict(color="#FFD700", dash="dot")))
+        fig.add_trace(go.Scatter(x=df["Time_UTC"], y=df["Earth_Horizon"], name="Terrain horizon toward Earth",
+                                 line=dict(color="#1E90FF", dash="dot")))
+    fig.update_layout(template="plotly_dark", height=420, hovermode="x unified",
+                      xaxis_title="Time (UTC)", yaxis_title="Elevation above local horizontal (°)")
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab2:
+    # Polar sky plot: centre = zenith, edge = horizon.
+    fig2 = go.Figure()
+    if has_mask:
+        az = np.arange(0, 361, 2)
+        hz = horizon_at(load_horizon(focus), az.astype(float))
+        fig2.add_trace(go.Scatterpolar(theta=az, r=90 - hz, name="Terrain horizon",
+                                       fill="toself", line=dict(color="gray")))
+    for label, alt, azc, color in [("Sun", "Sun_Alt", "Sun_Az", "#FFD700"),
+                                   ("Earth", "Earth_Alt", "Earth_Az", "#1E90FF")]:
+        fig2.add_trace(go.Scatterpolar(theta=df[azc], r=90 - df[alt], mode="markers", name=f"{label} track",
+                                       marker=dict(color=color, size=4)))
+    fig2.update_layout(template="plotly_dark", height=520,
+                       polar=dict(angularaxis=dict(direction="clockwise", rotation=90),
+                                  radialaxis=dict(range=[0, 90], tickvals=[0, 30, 60, 90],
+                                                  ticktext=["zenith", "60°", "30°", "horizon"])))
+    st.plotly_chart(fig2, use_container_width=True)
+    st.caption("Points near the rim are close to the horizon, where terrain easily blocks them.")
+
+with st.expander("ℹ️ Model assumptions & scientific limitations", expanded=True):
+    st.markdown(f"""
+- **Sun/Earth positions:** computed from the JPL DE421 ephemeris with the lunar principal-axis frame
+  (Skyfield). Kernel coverage: 1900-2050. Sites are treated as points on a spherical Moon surface.
+- **Terrain:** {"a horizon mask from `horizons/` is applied for this site." if has_mask else
+  "**no terrain data is applied for this site**; a flat horizon is assumed, which overestimates sunlight and Earth visibility. A real result needs a DEM-derived horizon (e.g. from LOLA)."}
+- **Earth visibility is geometric only.** Earth counts as visible when its centre is above the horizon;
+  real links also depend on antenna, link budget, relays and ground stations.
+- **Sampling:** results use {step_min}-minute steps; short events can be missed.
+- **Not modelled:** observer height (rover mast/antenna), Sun's finite disc, thermal conditions, ice presence.
+- Site coordinates are approximate and should be verified against a cited source.
+""")
