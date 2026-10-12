@@ -1,4 +1,5 @@
-streamlit
-pandas
+streamlit>=1.30
 numpy
+pandas
 plotly
+skyfield>=1.48
