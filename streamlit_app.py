@@ -14,6 +14,7 @@ What is NOT yet real (and the app says so on screen):
 Azimuth convention: degrees clockwise from local north, as returned by Skyfield's
 altaz() for the Moon-fixed frame. Horizon-mask CSVs must use the same convention.
 """
+import json
 import os
 import re
 from datetime import datetime, date, time
@@ -22,6 +23,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from skyfield.api import Loader
 from skyfield.planetarylib import PlanetaryConstants
 
@@ -191,6 +193,31 @@ def panorama_figure(df: pd.DataFrame, i: int, mask, has_mask: bool) -> go.Figure
     )
     return fig
 
+
+# ---------------------------------------------------------------------------
+# 3D first-person viewer (Three.js lives in viewer3d.html; Python only feeds it data)
+# ---------------------------------------------------------------------------
+def render_3d(df: pd.DataFrame, site_name: str, mask, has_mask: bool, step_min: int, height: int = 640):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer3d.html")
+    if not os.path.exists(path):
+        st.error("viewer3d.html not found next to this file.")
+        return
+    k = max(1, int(np.ceil(len(df) / 1500)))          # keep payload small
+    d = df.iloc[::k]
+    r = lambda a, n=3: [round(float(x), n) for x in a]
+    payload = {
+        "site": site_name,
+        "stepMin": step_min * k,
+        "times": [f"{x:%Y-%m-%d %H:%M} UTC" for x in d["Time_UTC"]],
+        "sunAz": r(d["Sun_Az"]), "sunAlt": r(d["Sun_Alt"]),
+        "earthAz": r(d["Earth_Az"]), "earthAlt": r(d["Earth_Alt"]),
+        "sunlit": [int(x) for x in d["Sunlit"]],
+        "earthVis": [int(x) for x in d["Earth_Visible"]],
+        "horizon": r(horizon_at(mask, np.arange(360, dtype=float)), 2) if has_mask else None,
+    }
+    html = open(path, encoding="utf-8").read().replace("__DATA__", json.dumps(payload))
+    components.html(html, height=height, scrolling=False)
+
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
@@ -249,7 +276,12 @@ c2.metric("Earth geometrically visible", f"{m['Earth visible %']:.1f}%")
 c3.metric("Longest darkness", f"{m['Longest darkness (h)']:.0f} h")
 c4.metric("Sun + Earth together", f"{m['Sun AND Earth %']:.1f}%")
 
-tab1, tab2, tab3 = st.tabs(["Elevation vs time", "Sky view (azimuth / elevation)", "First-person view"])
+tab3d, tab1, tab2, tab3 = st.tabs(["🌑 3D surface view", "Elevation vs time", "Sky view (azimuth / elevation)", "2D panorama"])
+
+with tab3d:
+    st.caption("Interactive 3D view from the landing site. Sun and Earth positions come from the ephemeris; "
+               "the ground texture and lander are decorative.")
+    render_3d(df, focus, load_horizon(focus), has_mask, step_min)
 
 with tab1:
     fig = go.Figure()
@@ -319,3 +351,4 @@ with st.expander("ℹ️ Model assumptions & scientific limitations", expanded=T
 - **Not modelled:** observer height (rover mast/antenna), Sun's finite disc, thermal conditions, ice presence.
 - Site coordinates are approximate and should be verified against a cited source.
 """)
+
