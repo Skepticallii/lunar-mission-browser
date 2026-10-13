@@ -131,6 +131,66 @@ def summarise(df: pd.DataFrame, step_min: int) -> dict:
     }
 
 
+
+# ---------------------------------------------------------------------------
+# First-person panorama (what an observer standing at the site sees)
+# ---------------------------------------------------------------------------
+def _break_wrap(az, alt):
+    """Insert gaps where azimuth wraps 360->0 so lines don't streak across the plot."""
+    xs, ys = [], []
+    for k in range(len(az)):
+        if k > 0 and abs(az[k] - az[k - 1]) > 180:
+            xs.append(None)
+            ys.append(None)
+        xs.append(float(az[k]))
+        ys.append(float(alt[k]))
+    return xs, ys
+
+
+def panorama_figure(df: pd.DataFrame, i: int, mask, has_mask: bool) -> go.Figure:
+    row = df.iloc[i]
+    lo = float(min(-4, np.floor(min(df["Sun_Alt"].min(), df["Earth_Alt"].min())) - 1))
+    hi = float(max(12, np.ceil(max(df["Sun_Alt"].max(), df["Earth_Alt"].max())) + 2))
+    az = np.arange(0, 361, 1.0)
+    hz = horizon_at(mask, az)
+
+    fig = go.Figure()
+    # Ground: filled from the bottom of the plot up to the terrain skyline
+    fig.add_trace(go.Scatter(x=az, y=np.full_like(az, lo), mode="lines", line=dict(width=0),
+                             hoverinfo="skip", showlegend=False))
+    fig.add_trace(go.Scatter(x=az, y=hz, mode="lines", fill="tonexty", name="Terrain skyline" if has_mask else "Flat horizon (no terrain data)",
+                             line=dict(color="#9a9a9a", width=2), fillcolor="rgba(120,120,120,0.55)"))
+    if has_mask:
+        fig.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.3)")
+
+    # Faint tracks over the whole window
+    for label, azc, altc, color in [("Sun track", "Sun_Az", "Sun_Alt", "rgba(255,215,0,0.35)"),
+                                    ("Earth track", "Earth_Az", "Earth_Alt", "rgba(30,144,255,0.45)")]:
+        xs, ys = _break_wrap(df[azc].to_numpy(), df[altc].to_numpy())
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name=label, line=dict(color=color, width=2)))
+
+    # Current positions
+    for label, azc, altc, color, size in [("Sun", "Sun_Az", "Sun_Alt", "#FFD700", 34),
+                                          ("Earth", "Earth_Az", "Earth_Alt", "#1E90FF", 24)]:
+        a, e = float(row[azc]), float(row[altc])
+        visible = e > float(horizon_at(mask, np.array([a]))[0])
+        fig.add_trace(go.Scatter(
+            x=[a], y=[e], mode="markers+text", name=f"{label} now",
+            text=[label if visible else f"{label} (blocked)"], textposition="top center",
+            textfont=dict(color="white"),
+            marker=dict(size=size, color=color, opacity=1.0 if visible else 0.3,
+                        line=dict(color="white", width=2 if visible else 1)),
+            hovertemplate=f"{label}<br>Az %{{x:.1f}}°<br>El %{{y:.2f}}°<extra></extra>"))
+
+    fig.update_layout(
+        template="plotly_dark", height=430, plot_bgcolor="#03050c",
+        xaxis=dict(range=[0, 360], tickvals=[0, 90, 180, 270, 360], ticktext=["N", "E", "S", "W", "N"],
+                   title="Direction (azimuth)"),
+        yaxis=dict(range=[lo, hi], title="Elevation (°)"),
+        legend=dict(orientation="h", y=-0.25),
+    )
+    return fig
+
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
@@ -189,7 +249,7 @@ c2.metric("Earth geometrically visible", f"{m['Earth visible %']:.1f}%")
 c3.metric("Longest darkness", f"{m['Longest darkness (h)']:.0f} h")
 c4.metric("Sun + Earth together", f"{m['Sun AND Earth %']:.1f}%")
 
-tab1, tab2 = st.tabs(["Elevation vs time", "Sky view (azimuth / elevation)"])
+tab1, tab2, tab3 = st.tabs(["Elevation vs time", "Sky view (azimuth / elevation)", "First-person view"])
 
 with tab1:
     fig = go.Figure()
@@ -225,6 +285,27 @@ with tab2:
                                                   ticktext=["zenith", "60°", "30°", "horizon"])))
     st.plotly_chart(fig2, use_container_width=True)
     st.caption("Points near the rim are close to the horizon, where terrain easily blocks them.")
+
+with tab3:
+    st.markdown("What an observer standing at this site would see looking around the horizon. "
+                "Drag the slider to move through time.")
+    idx = st.slider("Time step", 0, len(df) - 1, 0, key="pano_idx")
+    row = df.iloc[idx]
+    st.markdown(f"**{row['Time_UTC']:%Y-%m-%d %H:%M} UTC**")
+    mask_now = load_horizon(focus)
+    st.plotly_chart(panorama_figure(df, idx, mask_now, has_mask), use_container_width=True)
+    p1, p2 = st.columns(2)
+    if row["Sunlit"]:
+        p1.success(f"☀️ Sun above terrain horizon (elevation {row['Sun_Alt']:.2f}°) - solar power available")
+    else:
+        p1.error(f"☀️ Sun not visible (elevation {row['Sun_Alt']:.2f}°) - no direct solar power")
+    if row["Earth_Visible"]:
+        p2.success(f"🌍 Earth above terrain horizon (elevation {row['Earth_Alt']:.2f}°) - DTE geometrically possible")
+    else:
+        p2.error(f"🌍 Earth not visible (elevation {row['Earth_Alt']:.2f}°) - no direct-to-Earth line of sight")
+    if not has_mask:
+        st.caption("No terrain data for this site yet: the ground line is a flat 0° horizon, so the "
+                   "Sun and Earth appear unobstructed whenever they are above it.")
 
 with st.expander("ℹ️ Model assumptions & scientific limitations", expanded=True):
     st.markdown(f"""
