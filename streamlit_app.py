@@ -29,7 +29,7 @@ from skyfield.planetarylib import PlanetaryConstants
 
 st.set_page_config(page_title="Lunar Mission Browser - South Pole", page_icon="🌕", layout="wide")
 
-HORIZON_DIR = "horizons"
+HORIZON_DIR = "Model_1_Solar_Availability/outputs"
 KERNEL_DIR = "kernels"
 
 # ---------------------------------------------------------------------------
@@ -42,6 +42,7 @@ SITES = {
     "de Gerlache Rim": {"lat": -88.5, "lon": -87.1},
     "Malapert Massif": {"lat": -84.9, "lon": 12.9},
     "Haworth Crater Floor": {"lat": -87.4, "lon": -5.1},
+    "LM1 Horizon": {"lat": -89.5244, "lon": 56.30993},
 }
 
 
