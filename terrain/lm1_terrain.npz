@@ -1,0 +1,23 @@
+{
+  "name": "lm1",
+  "lat": -89.5244,
+  "lon": 56.30993,
+  "grid_px": [
+    500,
+    500
+  ],
+  "metres_per_pixel": 10.0,
+  "source_metres_per_pixel": 5.0,
+  "site_elevation_m": -26.5,
+  "relief_min_m": -683.5,
+  "relief_max_m": 813.625,
+  "slope_stats_native_resolution": {
+    "area_below_5deg_pct": 3.08,
+    "area_below_10deg_pct": 20.09,
+    "area_below_15deg_pct": 56.32,
+    "area_below_20deg_pct": 86.58
+  },
+  "crs": "taken from the GeoTIFF: PROJCS[\"Moon2000_spole\",GEOGCS[\"GCS_Moon\",DATUM[\"Moon_2000\",SPHEROID[\"Moon_2000_",
+  "dem_file": "lm1_5m.tif",
+  "note": "height_m is relative to the site. Slope computed at native resolution, then block-averaged."
+}
