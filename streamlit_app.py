@@ -14,6 +14,7 @@ What is NOT yet real (and the app says so on screen):
 Azimuth convention: degrees clockwise from local north, as returned by Skyfield's
 altaz() for the Moon-fixed frame. Horizon-mask CSVs must use the same convention.
 """
+import base64
 import json
 import os
 import re
@@ -30,6 +31,7 @@ from skyfield.planetarylib import PlanetaryConstants
 st.set_page_config(page_title="Lunar Mission Browser - South Pole", page_icon="🌕", layout="wide")
 
 HORIZON_DIR = "horizons"
+TERRAIN_DIR = "terrain"
 KERNEL_DIR = "kernels"
 
 # ---------------------------------------------------------------------------
@@ -43,7 +45,7 @@ SITES = {
     "Malapert Massif": {"lat": -84.9, "lon": 12.9},
     "Haworth Crater Floor": {"lat": -87.4, "lon": -5.1},
     # Provisional LM1 site from the team's LOLA 5 m/px DEM; horizon computed by the horizon script
-    "LM1 (Shackleton Rim B)": {"lat": -89.5244, "lon": 56.30993, "horizon_file": "lm1_horizon.csv"},
+    "LM1 (Shackleton Rim B)": {"lat": -89.5244, "lon": 56.30993, "horizon_file": "lm1_horizon.csv", "terrain": "lm1"},
 }
 
 
@@ -142,6 +144,39 @@ def summarise(df: pd.DataFrame, step_min: int) -> dict:
 
 
 
+
+# ---------------------------------------------------------------------------
+# Terrain products (made by preprocessing/make_terrain_products.py)
+# ---------------------------------------------------------------------------
+@st.cache_data
+def load_terrain(name: str):
+    npz = os.path.join(TERRAIN_DIR, f"{name}_terrain.npz")
+    js = os.path.join(TERRAIN_DIR, f"{name}_terrain.json")
+    if not (os.path.exists(npz) and os.path.exists(js)):
+        return None
+    d = np.load(npz)
+    with open(js) as f:
+        meta = json.load(f)
+    h = d["height_m"].astype("float32")
+    h = np.nan_to_num(h, nan=float(np.nanmean(h)))
+    lon = np.radians(meta["lon"])
+    derived = "north_xy" not in meta
+    # Local north/east as unit vectors in the DEM's map axes (x right, y up).
+    # Standard south-polar stereographic: north=(sin lon, cos lon), east=(cos lon, -sin lon).
+    north = meta.get("north_xy", [float(np.sin(lon)), float(np.cos(lon))])
+    east = meta.get("east_xy", [float(np.cos(lon)), float(-np.sin(lon))])
+    return {"height": h, "slope": d["slope_deg"].astype("float32"), "meta": meta,
+            "north": north, "east": east, "orientation_derived": derived}
+
+
+def hillshade(h: np.ndarray, mpp: float, az_deg: float = 315.0, alt_deg: float = 35.0) -> np.ndarray:
+    gy, gx = np.gradient(h.astype("float64"), mpp)       # rows run downward, so dz/dy(up) = -gy
+    n = np.dstack([-gx, gy, np.ones_like(gx)])
+    n /= np.linalg.norm(n, axis=2, keepdims=True)
+    az, alt = np.radians(az_deg), np.radians(alt_deg)
+    light = np.array([np.cos(alt) * np.sin(az), np.cos(alt) * np.cos(az), np.sin(alt)])
+    return np.clip(n @ light, 0, 1)
+
 # ---------------------------------------------------------------------------
 # First-person panorama (what an observer standing at the site sees)
 # ---------------------------------------------------------------------------
@@ -205,7 +240,7 @@ def panorama_figure(df: pd.DataFrame, i: int, mask, has_mask: bool) -> go.Figure
 # ---------------------------------------------------------------------------
 # 3D first-person viewer (Three.js lives in viewer3d.html; Python only feeds it data)
 # ---------------------------------------------------------------------------
-def render_3d(df: pd.DataFrame, site_name: str, mask, has_mask: bool, step_min: int, height: int = 640):
+def render_3d(df: pd.DataFrame, site_name: str, mask, has_mask: bool, step_min: int, tr=None, height: int = 640):
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer3d.html")
     if not os.path.exists(path):
         st.error("viewer3d.html not found next to this file.")
@@ -222,7 +257,16 @@ def render_3d(df: pd.DataFrame, site_name: str, mask, has_mask: bool, step_min: 
         "sunlit": [int(x) for x in d["Sunlit"]],
         "earthVis": [int(x) for x in d["Earth_Visible"]],
         "horizon": r(horizon_at(mask, np.arange(360, dtype=float)), 2) if has_mask else None,
+        "terrain": None,
     }
+    if tr is not None:
+        hgt = tr["height"]
+        scale = float(max(np.abs(hgt).max(), 1.0) / 32000.0)
+        ints = np.round(hgt / scale).astype("<i2")
+        payload["terrain"] = {"rows": int(hgt.shape[0]), "cols": int(hgt.shape[1]),
+                              "mpp": float(tr["meta"]["metres_per_pixel"]), "scale": scale,
+                              "north": tr["north"], "east": tr["east"],
+                              "b64": base64.b64encode(ints.tobytes()).decode("ascii")}
     html = open(path, encoding="utf-8").read().replace("__DATA__", json.dumps(payload))
     components.html(html, height=height, scrolling=False)
 
@@ -276,6 +320,7 @@ st.dataframe(pd.DataFrame(summary_rows).set_index("Site"), use_container_width=T
 st.markdown("---")
 focus = st.selectbox("Inspect site", chosen)
 df, has_mask = results[focus]
+tr = load_terrain(SITES[focus]['terrain']) if 'terrain' in SITES[focus] else None
 m = summarise(df, step_min)
 
 c1, c2, c3, c4 = st.columns(4)
@@ -284,12 +329,17 @@ c2.metric("Earth geometrically visible", f"{m['Earth visible %']:.1f}%")
 c3.metric("Longest darkness", f"{m['Longest darkness (h)']:.0f} h")
 c4.metric("Sun + Earth together", f"{m['Sun AND Earth %']:.1f}%")
 
-tab3d, tab1, tab2, tab3 = st.tabs(["🌑 3D surface view", "Elevation vs time", "Sky view (azimuth / elevation)", "2D panorama"])
+tab3d, tab1, tab2, tab3, tabT = st.tabs(["🌑 3D surface view", "Elevation vs time", "Sky view (azimuth / elevation)", "2D panorama", "⛰ Terrain suitability"])
 
 with tab3d:
-    st.caption("Interactive 3D view from the landing site. Sun and Earth positions come from the ephemeris; "
-               "the ground texture and lander are decorative.")
-    render_3d(df, focus, load_horizon(focus), has_mask, step_min)
+    if tr is not None:
+        st.caption("Interactive 3D view from the landing site. Terrain relief is real LOLA data (10 m grid, "
+                   f"{tr['height'].shape[1] * tr['meta']['metres_per_pixel'] / 1000:.1f} km square); beyond that the skyline "
+                   "comes from the horizon mask. Sun/Earth positions come from the ephemeris; surface texture and the lander are decorative.")
+    else:
+        st.caption("Interactive 3D view from the landing site. Sun and Earth positions come from the ephemeris; "
+                   "the ground is a flat decorative plane (no terrain product for this site yet).")
+    render_3d(df, focus, load_horizon(focus), has_mask, step_min, tr)
 
 with tab1:
     fig = go.Figure()
@@ -346,6 +396,69 @@ with tab3:
     if not has_mask:
         st.caption("No terrain data for this site yet: the ground line is a flat 0° horizon, so the "
                    "Sun and Earth appear unobstructed whenever they are above it.")
+
+with tabT:
+    if tr is None:
+        st.info("No terrain product for this site yet. Run `preprocessing/make_terrain_products.py` for it, "
+                "put the output in `terrain/`, and add `\"terrain\": \"<name>\"` to the site in `SITES`.")
+    else:
+        meta, hgt, slp = tr["meta"], tr["height"], tr["slope"]
+        mpp = meta["metres_per_pixel"]
+        rows, cols = hgt.shape
+        thr = st.slider("Maximum acceptable slope (°)", 2, 25, 10,
+                        help="Placeholder screening value. The real limit depends on the lander and must come from its specification.")
+        yy, xx = np.mgrid[0:rows, 0:cols]
+        dist = np.hypot(xx - cols / 2, yy - rows / 2) * mpp
+        inside = dist <= (min(rows, cols) / 2) * mpp
+        ok = (slp <= thr) & inside
+        site_slope = float(slp[rows // 2 - 1: rows // 2 + 2, cols // 2 - 1: cols // 2 + 2].mean())
+        near = ok[dist <= 500].mean() * 100 if (dist <= 500).any() else float("nan")
+        nearest = float(dist[ok].min()) if ok.any() else float("nan")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Slope at site", f"{site_slope:.1f}°")
+        m2.metric(f"Area ≤ {thr}° (whole cutout)", f"{100 * ok.sum() / inside.sum():.1f}%")
+        m3.metric(f"Area ≤ {thr}° within 500 m", f"{near:.1f}%")
+        m4.metric("Nearest cell ≤ threshold", f"{nearest:.0f} m" if np.isfinite(nearest) else "none")
+
+        shade = hillshade(hgt, mpp)
+        xs = (np.arange(cols) - cols / 2) * mpp
+        ys = (rows / 2 - np.arange(rows)) * mpp
+        fig = go.Figure()
+        fig.add_trace(go.Heatmap(x=xs, y=ys[::-1], z=shade[::-1], colorscale="gray", showscale=False,
+                                 hoverinfo="skip"))
+        fig.add_trace(go.Heatmap(x=xs, y=ys[::-1], z=np.where(ok, 1.0, np.nan)[::-1],
+                                 colorscale=[[0, "rgba(46,204,113,0.55)"], [1, "rgba(46,204,113,0.55)"]],
+                                 showscale=False, name="slope ≤ threshold",
+                                 customdata=slp[::-1], hovertemplate="slope %{customdata:.1f}°<extra></extra>"))
+        fig.add_trace(go.Scatter(x=[0], y=[0], mode="markers", name="Site",
+                                 marker=dict(symbol="x", size=12, color="cyan", line=dict(width=2))))
+        n = np.array(tr["north"]) * 450
+        fig.add_annotation(x=n[0], y=n[1], ax=0, ay=0, xref="x", yref="y", axref="x", ayref="y",
+                           showarrow=True, arrowhead=3, arrowwidth=2, arrowcolor="cyan",
+                           text="N", font=dict(color="cyan", size=14))
+        fig.update_layout(template="plotly_dark", height=560, margin=dict(l=10, r=10, t=30, b=10),
+                          xaxis=dict(title="Map x from site (m)", scaleanchor="y", constrain="domain"),
+                          yaxis=dict(title="Map y from site (m)", constrain="domain"),
+                          title="Green = slope at or below the threshold (hillshade underlay)")
+        left, right = st.columns([3, 2])
+        left.plotly_chart(fig, use_container_width=True)
+        hist = go.Figure(go.Histogram(x=slp[inside].ravel(), nbinsx=50, marker_color="#c0c0c0"))
+        hist.add_vline(x=thr, line_color="#2ecc71", annotation_text=f"{thr}°")
+        hist.update_layout(template="plotly_dark", height=300, xaxis_title="Slope (°)", yaxis_title="Cells",
+                           margin=dict(l=10, r=10, t=30, b=10), title="Slope distribution")
+        right.plotly_chart(hist, use_container_width=True)
+        stats = meta["slope_stats_native_resolution"]
+        right.markdown("**Share of area by slope, at native 5 m resolution**  \n" +
+                       "  \n".join(f"- {k.replace('area_below_', '≤ ').replace('deg_pct', '°')}: {v}%" for k, v in stats.items()))
+        st.caption(
+            f"Source: {meta['dem_file']}, {meta['source_metres_per_pixel']:g} m/px averaged to {mpp:g} m for display. "
+            "Slope depends on DEM resolution, so quote the resolution with any slope number. This is a first screening, "
+            "not a landing-safety assessment: it ignores boulders, craters smaller than the DEM resolution, and lander-specific limits. "
+            "Percentages above use the averaged grid, so they read slightly gentler than the native-resolution table. "
+            + ("Map axes follow the DEM projection (not north-up); the N arrow is derived from a standard polar-stereographic "
+               "assumption - re-run make_terrain_products.py to store it from the DEM's own CRS." if tr["orientation_derived"]
+               else "Map axes follow the DEM projection (not north-up); the N arrow comes from the DEM's CRS."))
 
 with st.expander("ℹ️ Model assumptions & scientific limitations", expanded=True):
     st.markdown(f"""
