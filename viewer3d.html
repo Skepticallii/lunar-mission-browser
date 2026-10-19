@@ -210,7 +210,7 @@ if (D.horizon){
 })();
 
 /* ---------- lights ---------- */
-scene.add(new THREE.HemisphereLight(0x25324f,0x0d0d12,0.35));
+scene.add(new THREE.AmbientLight(0xffffff, 0.4)); // Soft global fill light
 const sunLight=new THREE.DirectionalLight(0xffffff,1.8);
 sunLight.castShadow=true;sunLight.shadow.mapSize.set(4096,4096);const SH=D.terrain?2600:220;
 const sc=sunLight.shadow.camera;sc.left=-SH;sc.right=SH;sc.top=SH;sc.bottom=-SH;sc.near=1;sc.far=D.terrain?9000:1200;
@@ -281,7 +281,7 @@ function update(dt){
   earth.rotation.y=t*stepH*15*R;
   sunUniform.value.copy(sv);
   sunLight.position.copy(sv).multiplyScalar(D.terrain?4000:500);sunLight.target.position.set(0,0,0);
-  const target=D.sunlit[i]?1.8:0;sunLight.intensity+=(target-sunLight.intensity)*Math.min(1,dt*8);
+  const target=D.sunlit[i]?1.8:0.5;sunLight.intensity+=(target-sunLight.intensity)*Math.min(1,dt*8);
   const a=toAzAlt(sv),b=toAzAlt(ev);
   $('time').textContent=D.times[i];$('hud').innerHTML=`<b>${D.site}</b><br>Sun &nbsp;az ${a.az.toFixed(1)}° &nbsp;el ${a.alt.toFixed(2)}°<br>Earth az ${b.az.toFixed(1)}° &nbsp;el ${b.alt.toFixed(2)}°<br>`+
     `<span style="opacity:.65;font-size:11px">${D.terrain?'Surface: real LOLA relief (10 m grid)':'Surface: decorative flat plane - no LOLA terrain for this site'} · viewer ${VIEWER}</span><br>`+
