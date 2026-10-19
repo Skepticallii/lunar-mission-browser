@@ -94,11 +94,22 @@ def compute_geometry(lat: float, lon: float, start_iso: str, hours: int, step_mi
 # ---------------------------------------------------------------------------
 # Horizon masks
 # ---------------------------------------------------------------------------
+HORIZON_SEARCH = [HORIZON_DIR, "Model_1_Solar_Availability/outputs", "Model_1_Solar_Availability", "LOLA_Data"]
+
+
+def horizon_path(site_name: str):
+    fname = SITES.get(site_name, {}).get("horizon_file", f"{slug(site_name)}.csv")
+    for d in HORIZON_SEARCH:
+        path = os.path.join(d, fname)
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def load_horizon(site_name: str):
     """Return (azimuth_deg, horizon_elev_deg) arrays, or None if the site has no mask."""
-    fname = SITES.get(site_name, {}).get("horizon_file", f"{slug(site_name)}.csv")
-    path = os.path.join(HORIZON_DIR, fname)
-    if not os.path.exists(path):
+    path = horizon_path(site_name)
+    if path is None:
         return None
     h = pd.read_csv(path).sort_values("azimuth_deg")
     az = h["azimuth_deg"].to_numpy(float)
@@ -176,6 +187,26 @@ def hillshade(h: np.ndarray, mpp: float, az_deg: float = 315.0, alt_deg: float =
     az, alt = np.radians(az_deg), np.radians(alt_deg)
     light = np.array([np.cos(alt) * np.sin(az), np.cos(alt) * np.cos(az), np.sin(alt)])
     return np.clip(n @ light, 0, 1)
+
+def terrain_skyline(tr) -> list:
+    """Skyline (deg) from the terrain cutout alone. Only sees out to the cutout edge (~2.5 km)."""
+    h, mpp = tr["height"], tr["meta"]["metres_per_pixel"]
+    rows, cols = h.shape
+    east, north = tr["east"], tr["north"]
+    ds = np.arange(mpp, min(rows, cols) / 2 * mpp - mpp, mpp)
+    z0 = float(h[rows // 2, cols // 2]) + 1.8
+    out = []
+    for az in range(360):
+        a = np.radians(az)
+        e, n = np.sin(a) * ds, np.cos(a) * ds
+        dx, dy = e * east[0] + n * north[0], e * east[1] + n * north[1]
+        c = np.rint(dx / mpp + cols / 2).astype(int)
+        r = np.rint(-dy / mpp + rows / 2).astype(int)
+        ok = (r >= 0) & (r < rows) & (c >= 0) & (c < cols)
+        ang = np.degrees(np.arctan2(h[r[ok], c[ok]] - z0 - ds[ok] ** 2 / (2 * 1_737_400.0), ds[ok]))
+        out.append(round(float(ang.max()), 2) if ang.size else 0.0)
+    return out
+
 
 # ---------------------------------------------------------------------------
 # First-person panorama (what an observer standing at the site sees)
@@ -256,7 +287,9 @@ def render_3d(df: pd.DataFrame, site_name: str, mask, has_mask: bool, step_min: 
         "earthAz": r(d["Earth_Az"]), "earthAlt": r(d["Earth_Alt"]),
         "sunlit": [int(x) for x in d["Sunlit"]],
         "earthVis": [int(x) for x in d["Earth_Visible"]],
-        "horizon": r(horizon_at(mask, np.arange(360, dtype=float)), 2) if has_mask else None,
+        "horizon": (r(horizon_at(mask, np.arange(360, dtype=float)), 2) if has_mask
+                    else (terrain_skyline(tr) if tr is not None else None)),
+        "horizonSource": "mask" if has_mask else ("terrain" if tr is not None else None),
         "terrain": None,
     }
     if tr is not None:
@@ -280,7 +313,7 @@ st.markdown(
 )
 
 st.sidebar.header("Mission Parameters")
-chosen = st.sidebar.multiselect("Candidate sites", list(SITES), default=list(SITES)[:2])
+chosen = st.sidebar.multiselect("Candidate sites", list(SITES), default=["LM1 (Shackleton Rim B)", "Malapert Massif"])
 start_date = st.sidebar.date_input("Start date (UTC)", value=date(2026, 10, 15),
                                    min_value=date(1990, 1, 1), max_value=date(2049, 12, 31))
 start_hour = st.sidebar.slider("Start hour (UTC)", 0, 23, 0)
@@ -339,6 +372,13 @@ with tab3d:
     else:
         st.caption("Interactive 3D view from the landing site. Sun and Earth positions come from the ephemeris; "
                    "the ground is a flat decorative plane (no terrain product for this site yet).")
+    want_terrain = "terrain" in SITES[focus]
+    st.caption(" · ".join([
+        f"**{focus}**",
+        "terrain: ✅ loaded" if tr is not None else ("terrain: ❌ file not found in terrain/" if want_terrain
+                                                      else "terrain: none for this site (decorative flat ground)"),
+        f"horizon mask: ✅ {horizon_path(focus)}" if has_mask else "horizon mask: ❌ not found (flat 0° horizon)",
+    ]))
     render_3d(df, focus, load_horizon(focus), has_mask, step_min, tr)
 
 with tab1:
