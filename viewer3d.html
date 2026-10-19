@@ -140,14 +140,14 @@ if (D.terrain){
   const T=D.terrain, rows=T.rows, cols=T.cols, mpp=T.mpp;
   const bin=atob(T.b64), u8=new Uint8Array(bin.length);
   for(let i=0;i<bin.length;i++) u8[i]=bin.charCodeAt(i);
-  const h32=new Float32Array(u8.buffer), cx=cols/2, cy=rows/2;
+  const h16=new Int16Array(u8.buffer), cx=cols/2, cy=rows/2;
   const scale = T.scale !== undefined ? T.scale : 1.0;
   const pos=new Float32Array(rows*cols*3), uv=new Float32Array(rows*cols*2);
   for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
     const dx=(c-cx)*mpp, dy=-(r-cy)*mpp;
     const east=dx*T.east[0]+dy*T.east[1], north=dx*T.north[0]+dy*T.north[1];
     const k=r*cols+c;
-    pos[k*3]=east; pos[k*3+1]=h32[k]*scale; pos[k*3+2]=-north;
+    pos[k*3]=east; pos[k*3+1]=h16[k]*scale; pos[k*3+2]=-north;
     uv[k*2]=east/tex.tile; uv[k*2+1]=-north/tex.tile;
   }
   const idx=new Uint32Array((rows-1)*(cols-1)*6); let q=0;
@@ -172,7 +172,7 @@ if (D.terrain){
     const fc=dx/mpp+cx, fr=-dy/mpp+cy;
     const c0=Math.max(0,Math.min(cols-2,Math.floor(fc))), r0=Math.max(0,Math.min(rows-2,Math.floor(fr)));
     const tc=Math.max(0,Math.min(1,fc-c0)), tr=Math.max(0,Math.min(1,fr-r0));
-    const g=(r,c)=>h32[r*cols+c]*scale;
+    const g=(r,c)=>h16[r*cols+c]*scale;
     return (g(r0,c0)*(1-tc)+g(r0,c0+1)*tc)*(1-tr)+(g(r0+1,c0)*(1-tc)+g(r0+1,c0+1)*tc)*tr;
   };
   camera.position.y=1.8+heightAt(0,0);
@@ -210,7 +210,7 @@ if (D.horizon){
 })();
 
 /* ---------- lights ---------- */
-scene.add(new THREE.AmbientLight(0xffffff, 0.4)); // Soft global fill light
+scene.add(new THREE.HemisphereLight(0x25324f,0x0d0d12,0.35));
 const sunLight=new THREE.DirectionalLight(0xffffff,1.8);
 sunLight.castShadow=true;sunLight.shadow.mapSize.set(4096,4096);const SH=D.terrain?2600:220;
 const sc=sunLight.shadow.camera;sc.left=-SH;sc.right=SH;sc.top=SH;sc.bottom=-SH;sc.near=1;sc.far=D.terrain?9000:1200;
@@ -281,7 +281,7 @@ function update(dt){
   earth.rotation.y=t*stepH*15*R;
   sunUniform.value.copy(sv);
   sunLight.position.copy(sv).multiplyScalar(D.terrain?4000:500);sunLight.target.position.set(0,0,0);
-  const target=D.sunlit[i]?1.8:0.5;sunLight.intensity+=(target-sunLight.intensity)*Math.min(1,dt*8);
+  const target=D.sunlit[i]?1.8:0;sunLight.intensity+=(target-sunLight.intensity)*Math.min(1,dt*8);
   const a=toAzAlt(sv),b=toAzAlt(ev);
   $('time').textContent=D.times[i];$('hud').innerHTML=`<b>${D.site}</b><br>Sun &nbsp;az ${a.az.toFixed(1)}° &nbsp;el ${a.alt.toFixed(2)}°<br>Earth az ${b.az.toFixed(1)}° &nbsp;el ${b.alt.toFixed(2)}°<br>`+
     `<span style="opacity:.65;font-size:11px">${D.terrain?'Surface: real LOLA relief (10 m grid)':'Surface: decorative flat plane - no LOLA terrain for this site'} · viewer ${VIEWER}</span><br>`+
@@ -312,4 +312,7 @@ wrap.addEventListener('pointerup',()=>drag=null);
 wrap.addEventListener('wheel',e=>{e.preventDefault();fov=Math.max(15,Math.min(90,fov+e.deltaY*0.03));},{passive:false});
 $('play').onclick=()=>{playing=!playing;$('play').textContent=playing?'⏸':'▶';};
 slider.oninput=()=>{t=Number(slider.value);};
-$('faceSun').onclick=()=>{const a=toAzAlt(sample(D.sunAz,D.sunAlt,t));yaw=a.az;pitch=Math.max(0,a.alt)+3;};$('faceEarth').onclick=()=>{const a=toAzAlt(sample(D.earthAz,D.earthAlt,t));yaw=a.az;pitch=Math.max(0,a
+$('faceSun').onclick=()=>{const a=toAzAlt(sample(D.sunAz,D.sunAlt,t));yaw=a.az;pitch=Math.max(0,a.alt)+3;};$('faceEarth').onclick=()=>{const a=toAzAlt(sample(D.earthAz,D.earthAlt,t));yaw=a.az;pitch=Math.max(0,a.alt)+3;};
+</script>
+</body>
+</html>
