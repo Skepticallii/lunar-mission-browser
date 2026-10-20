@@ -1,0 +1,5 @@
+site_id,site_name,latitude_deg,longitude_deg,observer_elevation_m,sun_visible_sample_percent,earth_visible_sample_percent,sample_count,sample_interval_minutes,scientific_status
+LM1,Shackleton Rim B,-89.5244,56.30993,-27.784671783447266,55.91951333645297,82.03088441740758,2137,60,PRELIMINARY - verify DEM/SPICE reference-frame alignment
+Site06,Nobile Rim 1,-85.4381,37.36667,5946.12841796875,35.42349087505849,29.386991109031353,2137,60,PRELIMINARY - verify DEM/SPICE reference-frame alignment
+Site20,Leibnitz Beta Plateau,-85.4266,31.74276,6398.1748046875,45.53111839026673,32.24145999064108,2137,60,PRELIMINARY - verify DEM/SPICE reference-frame alignment
+Site23,Malapert Massif,-85.9948,-0.23578,4783.62939453125,44.454843238184374,42.62985493682733,2137,60,PRELIMINARY - verify DEM/SPICE reference-frame alignment
