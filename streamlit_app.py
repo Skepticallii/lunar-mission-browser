@@ -35,17 +35,14 @@ TERRAIN_DIR = "terrain"
 KERNEL_DIR = "kernels"
 
 # ---------------------------------------------------------------------------
-# Candidate sites. Coordinates are APPROXIMATE - verify each against a
-# documented source (e.g. USGS Gazetteer / LROC) before submission.
+# Candidate sites and coordinates as given in the team's site_comparison.csv.
 # Longitude is east-positive, -180..180.
 # ---------------------------------------------------------------------------
 SITES = {
-    "Shackleton Crater Rim": {"lat": -89.9, "lon": 129.8},
-    "de Gerlache Rim": {"lat": -88.5, "lon": -87.1},
-    "Malapert Massif": {"lat": -84.9, "lon": 12.9},
-    "Haworth Crater Floor": {"lat": -87.4, "lon": -5.1},
-    # Provisional LM1 site from the team's LOLA 5 m/px DEM; horizon computed by the horizon script
-    "LM1 (Shackleton Rim B)": {"lat": -89.5244, "lon": 56.30993, "horizon_file": "lm1_horizon.csv", "terrain": "lm1"},
+    "LM1 - Shackleton Rim B": {"id": "LM1", "lat": -89.5244, "lon": 56.30993, "terrain": "lm1"},
+    "Site06 - Nobile Rim 1": {"id": "Site06", "lat": -85.4381, "lon": 37.36667, "terrain": "site06"},
+    "Site20 - Leibnitz Beta Plateau": {"id": "Site20", "lat": -85.4266, "lon": 31.74276, "terrain": "site20"},
+    "Site23 - Malapert Massif": {"id": "Site23", "lat": -85.9948, "lon": -0.23578, "terrain": "site23"},
 }
 
 
@@ -94,11 +91,10 @@ def compute_geometry(lat: float, lon: float, start_iso: str, hours: int, step_mi
 # ---------------------------------------------------------------------------
 # Horizon masks
 # ---------------------------------------------------------------------------
-HORIZON_SEARCH = [HORIZON_DIR, "Model_1_Solar_Availability/outputs", "Model_1_Solar_Availability", "LOLA_Data"]
+HORIZON_SEARCH = [HORIZON_DIR, "data", "Model_1_Solar_Availability/outputs", "Model_1_Solar_Availability", "LOLA_Data", "."]
 
 
-def horizon_path(site_name: str):
-    fname = SITES.get(site_name, {}).get("horizon_file", f"{slug(site_name)}.csv")
+def find_file(fname: str):
     for d in HORIZON_SEARCH:
         path = os.path.join(d, fname)
         if os.path.exists(path):
@@ -106,16 +102,33 @@ def horizon_path(site_name: str):
     return None
 
 
+@st.cache_data
+def _profile_ids(path: str):
+    return set(pd.read_csv(path, usecols=["site_id"])["site_id"].unique())
+
+
+def horizon_path(site_name: str):
+    """Where this site's horizon comes from: the combined horizon_profiles.csv, else <id>_horizon.csv."""
+    sid = SITES[site_name]["id"]
+    combined = find_file("horizon_profiles.csv")
+    if combined and sid in _profile_ids(combined):
+        return combined
+    return find_file(f"{sid.lower()}_horizon.csv")
+
+
 def load_horizon(site_name: str):
     """Return (azimuth_deg, horizon_elev_deg) arrays, or None if the site has no mask."""
     path = horizon_path(site_name)
     if path is None:
         return None
-    h = pd.read_csv(path).sort_values("azimuth_deg")
-    az = h["azimuth_deg"].to_numpy(float)
-    el = h["horizon_elev_deg"].to_numpy(float)
+    h = pd.read_csv(path)
+    if "site_id" in h.columns:
+        h = h[h["site_id"] == SITES[site_name]["id"]]
+    col = "horizon_elevation_deg" if "horizon_elevation_deg" in h.columns else "horizon_elev_deg"
+    h = h.sort_values("azimuth_deg")
+    az, el = h["azimuth_deg"].to_numpy(float), h[col].to_numpy(float)
     if len(az) < 8 or not np.all(np.isfinite(el)):
-        raise ValueError(f"{path}: horizon file must have finite values and at least 8 azimuths")
+        raise ValueError(f"{path}: horizon data must be finite with at least 8 azimuths")
     return az, el
 
 
@@ -154,8 +167,6 @@ def summarise(df: pd.DataFrame, step_min: int) -> dict:
     }
 
 
-
-
 # ---------------------------------------------------------------------------
 # Terrain products (made by preprocessing/make_terrain_products.py)
 # ---------------------------------------------------------------------------
@@ -181,7 +192,7 @@ def load_terrain(name: str):
 
 
 def hillshade(h: np.ndarray, mpp: float, az_deg: float = 315.0, alt_deg: float = 35.0) -> np.ndarray:
-    gy, gx = np.gradient(h.astype("float64"), mpp)       # rows run downward, so dz/dy(up) = -gy
+    gy, gx = np.gradient(h.astype("float64"), mpp)        # rows run downward, so dz/dy(up) = -gy
     n = np.dstack([-gx, gy, np.ones_like(gx)])
     n /= np.linalg.norm(n, axis=2, keepdims=True)
     az, alt = np.radians(az_deg), np.radians(alt_deg)
@@ -247,7 +258,7 @@ def panorama_figure(df: pd.DataFrame, i: int, mask, has_mask: bool) -> go.Figure
 
     # Current positions
     for label, azc, altc, color, size in [("Sun", "Sun_Az", "Sun_Alt", "#FFD700", 34),
-                                          ("Earth", "Earth_Az", "Earth_Alt", "#1E90FF", 24)]:
+                                         ("Earth", "Earth_Az", "Earth_Alt", "#1E90FF", 24)]:
         a, e = float(row[azc]), float(row[altc])
         visible = e > float(horizon_at(mask, np.array([a]))[0])
         fig.add_trace(go.Scatter(
@@ -276,7 +287,7 @@ def render_3d(df: pd.DataFrame, site_name: str, mask, has_mask: bool, step_min: 
     if not os.path.exists(path):
         st.error("viewer3d.html not found next to this file.")
         return
-    k = max(1, int(np.ceil(len(df) / 1500)))          # keep payload small
+    k = max(1, int(np.ceil(len(df) / 1500)))           # keep payload small
     d = df.iloc[::k]
     r = lambda a, n=3: [round(float(x), n) for x in a]
     payload = {
@@ -303,6 +314,7 @@ def render_3d(df: pd.DataFrame, site_name: str, mask, has_mask: bool, step_min: 
     html = open(path, encoding="utf-8").read().replace("__DATA__", json.dumps(payload))
     components.html(html, height=height, scrolling=False)
 
+
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
@@ -313,13 +325,13 @@ st.markdown(
 )
 
 st.sidebar.header("Mission Parameters")
-chosen = st.sidebar.multiselect("Candidate sites", list(SITES), default=["LM1 (Shackleton Rim B)", "Malapert Massif"])
+chosen = st.sidebar.multiselect("Candidate sites", list(SITES), default=list(SITES)[:2])
 start_date = st.sidebar.date_input("Start date (UTC)", value=date(2026, 10, 15),
                                    min_value=date(1990, 1, 1), max_value=date(2049, 12, 31))
 start_hour = st.sidebar.slider("Start hour (UTC)", 0, 23, 0)
-duration_hours = st.sidebar.slider("Window (hours)", 24, 2160, 708, step=24,
+duration_hours = st.sidebar.slider("Window (hours)", 24, 2160, 2136, step=24,
                                    help="~708 h is one lunar day-night cycle (synodic month, ~29.5 d).")
-step_min = st.sidebar.select_slider("Time step (minutes)", options=[10, 15, 30, 60], value=30,
+step_min = st.sidebar.select_slider("Time step (minutes)", options=[10, 15, 30, 60], value=60,
                                     help="Coarse steps can miss short illumination or darkness intervals.")
 
 if not chosen:
@@ -348,7 +360,17 @@ if any(not m for _, m in results.values()):
     )
 
 st.subheader("Site comparison")
-st.dataframe(pd.DataFrame(summary_rows).set_index("Site"), use_container_width=True)
+table = pd.DataFrame(summary_rows)
+team_path = find_file("site_comparison.csv")
+if team_path and start_iso == "2026-10-15T00:00:00" and duration_hours == 2136 and step_min == 60:
+    team = pd.read_csv(team_path).set_index("site_id")
+    ids = [SITES[n]["id"] for n in table["Site"]]
+    table["Team CSV sunlit %"] = [round(float(team.loc[i, "sun_visible_sample_percent"]), 1) if i in team.index else np.nan for i in ids]
+    table["Team CSV Earth %"] = [round(float(team.loc[i, "earth_visible_sample_percent"]), 1) if i in team.index else np.nan for i in ids]
+    st.caption("“Team CSV” columns come from the team's SPICE pipeline (89 days, hourly). Sunlit % should agree with the "
+               "app to within ~0.1 points. Team Earth % reads about 1-3 points HIGHER: the SPICE pipeline measures Earth from "
+               "the Moon's centre, not the site on the surface (lunar parallax, up to 0.28°). The app's live numbers use the surface site.")
+st.dataframe(table.set_index("Site"), use_container_width=True)
 
 st.markdown("---")
 focus = st.selectbox("Inspect site", chosen)
@@ -376,7 +398,7 @@ with tab3d:
     st.caption(" · ".join([
         f"**{focus}**",
         "terrain: ✅ loaded" if tr is not None else ("terrain: ❌ file not found in terrain/" if want_terrain
-                                                      else "terrain: none for this site (decorative flat ground)"),
+                                                    else "terrain: none for this site (decorative flat ground)"),
         f"horizon mask: ✅ {horizon_path(focus)}" if has_mask else "horizon mask: ❌ not found (flat 0° horizon)",
     ]))
     render_3d(df, focus, load_horizon(focus), has_mask, step_min, tr)
