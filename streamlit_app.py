@@ -33,16 +33,24 @@ st.set_page_config(page_title="Lunar Mission Browser - South Pole", page_icon="�
 HORIZON_DIR = "horizons"
 TERRAIN_DIR = "terrain"
 KERNEL_DIR = "kernels"
+EARTH_RADIUS_KM = 6378.137
+
+# Earth is ~1.9 deg wide in the lunar sky (radius ~0.95 deg), so "visible" needs a definition.
+EARTH_RULES = {
+    "Any part of Earth's disc (NASA definition; used by Model 2)": 1.0,
+    "Centre of Earth above horizon": 0.0,
+    "Whole Earth disc above horizon": -1.0,
+}
 
 # ---------------------------------------------------------------------------
 # Candidate sites and coordinates as given in the team's site_comparison.csv.
 # Longitude is east-positive, -180..180.
 # ---------------------------------------------------------------------------
 SITES = {
-    "LM1 - Shackleton Rim B": {"id": "LM1", "lat": -89.5244, "lon": 56.30993, "terrain": "lm1"},
-    "Site06 - Nobile Rim 1": {"id": "Site06", "lat": -85.4381, "lon": 37.36667, "terrain": "site06"},
-    "Site20 - Leibnitz Beta Plateau": {"id": "Site20", "lat": -85.4266, "lon": 31.74276, "terrain": "site20"},
-    "Site23 - Malapert Massif": {"id": "Site23", "lat": -85.9948, "lon": -0.23578, "terrain": "site23"},
+    "LM1 - Shackleton Rim B": {"id": "LM1", "lat": -89.5244, "lon": 56.30993, "elev": -27.784672, "terrain": "lm1"},
+    "Site06 - Nobile Rim 1": {"id": "Site06", "lat": -85.4381, "lon": 37.36667, "elev": 5946.128418, "terrain": "site06"},
+    "Site20 - Leibnitz Beta Plateau": {"id": "Site20", "lat": -85.4266, "lon": 31.74276, "elev": 6398.174805, "terrain": "site20"},
+    "Site23 - Malapert Massif": {"id": "Site23", "lat": -85.9948, "lon": -0.23578, "elev": 4783.629395, "terrain": "site23"},
 }
 
 
@@ -67,17 +75,17 @@ def load_kernels():
 
 
 @st.cache_data(show_spinner="Computing Sun and Earth geometry...")
-def compute_geometry(lat: float, lon: float, start_iso: str, hours: int, step_min: int) -> pd.DataFrame:
+def compute_geometry_n(lat: float, lon: float, elev_m: float, start_iso: str, n: int, step_min: float) -> pd.DataFrame:
     ts, eph, pc, frame = load_kernels()
     start = datetime.fromisoformat(start_iso)
-    t0 = ts.utc(start.year, start.month, start.day, start.hour, start.minute)
-    n = int(hours * 60 / step_min)
+    t0 = ts.utc(start.year, start.month, start.day, start.hour, start.minute, start.second)
     t = ts.tt_jd(t0.tt + np.arange(n) * step_min / 1440.0)
 
-    place = eph["moon"] + pc.build_latlon_degrees(frame, lat, lon)
+    place = eph["moon"] + pc.build_latlon_degrees(frame, lat, lon, elevation_m=elev_m)
     obs = place.at(t)
     sun_alt, sun_az, _ = obs.observe(eph["sun"]).apparent().altaz()
-    earth_alt, earth_az, _ = obs.observe(eph["earth"]).apparent().altaz()
+    earth_alt, earth_az, earth_dist = obs.observe(eph["earth"]).apparent().altaz()
+    radius = np.degrees(np.arcsin(np.minimum(1.0, EARTH_RADIUS_KM / earth_dist.km)))
 
     return pd.DataFrame({
         "Time_UTC": pd.to_datetime(t.utc_datetime()).tz_localize(None),
@@ -85,13 +93,19 @@ def compute_geometry(lat: float, lon: float, start_iso: str, hours: int, step_mi
         "Sun_Az": sun_az.degrees,
         "Earth_Alt": earth_alt.degrees,
         "Earth_Az": earth_az.degrees,
+        "Earth_Radius": radius,
     })
+
+
+def compute_geometry(lat: float, lon: float, start_iso: str, hours: int, step_min: int, elev_m: float = 0.0) -> pd.DataFrame:
+    return compute_geometry_n(lat, lon, elev_m, start_iso, int(hours * 60 / step_min), step_min)
 
 
 # ---------------------------------------------------------------------------
 # Horizon masks
 # ---------------------------------------------------------------------------
-HORIZON_SEARCH = [HORIZON_DIR, "data", "Model_1_Solar_Availability/outputs", "Model_1_Solar_Availability", "LOLA_Data", "."]
+HORIZON_SEARCH = [HORIZON_DIR, "data", "data/dte", "Model_1_Solar_Availability/outputs", "Model_2_DTE/outputs/dte",
+                  "Model_2_DTE/outputs", "Model_3_Terrain/outputs", "Model_3_Terrain", "LOLA_Data", "."]
 
 
 def find_file(fname: str):
@@ -138,15 +152,20 @@ def horizon_at(mask, az):
     return np.interp(az, mask[0], mask[1], period=360.0)
 
 
-def analyse(site_name: str, hours: int, start_iso: str, step_min: int):
-    s = SITES[site_name]
-    df = compute_geometry(s["lat"], s["lon"], start_iso, hours, step_min)
+def analyse_df(df: pd.DataFrame, site_name: str, earth_rule: str):
     mask = load_horizon(site_name)
     df["Sun_Horizon"] = horizon_at(mask, df["Sun_Az"].to_numpy())
     df["Earth_Horizon"] = horizon_at(mask, df["Earth_Az"].to_numpy())
     df["Sunlit"] = df["Sun_Alt"] > df["Sun_Horizon"]
-    df["Earth_Visible"] = df["Earth_Alt"] > df["Earth_Horizon"]
+    k = EARTH_RULES[earth_rule]                       # +1 any part of the disc, 0 centre, -1 whole disc
+    df["Earth_Visible"] = (df["Earth_Alt"] + k * df["Earth_Radius"]) > df["Earth_Horizon"]
     return df, mask is not None
+
+
+def analyse(site_name: str, hours: int, start_iso: str, step_min: int, earth_rule: str):
+    s = SITES[site_name]
+    df = compute_geometry(s["lat"], s["lon"], start_iso, hours, step_min, s.get("elev", 0.0))
+    return analyse_df(df, site_name, earth_rule)
 
 
 def longest_run_hours(flags: np.ndarray, step_min: int) -> float:
@@ -165,6 +184,90 @@ def summarise(df: pd.DataFrame, step_min: int) -> dict:
         "Longest darkness (h)": longest_run_hours(~df["Sunlit"].to_numpy(), step_min),
         "Longest no-Earth (h)": longest_run_hours(~df["Earth_Visible"].to_numpy(), step_min),
     }
+
+
+
+
+# ---------------------------------------------------------------------------
+# Models 2 and 3: the team's CSV outputs
+# ---------------------------------------------------------------------------
+@st.cache_data
+def load_dte(site_id: str):
+    """Model 2 timeline for one site (<ID>_dte_timeline.csv), or None."""
+    path = find_file(f"{site_id}_dte_timeline.csv")
+    if path is None:
+        return None
+    d = pd.read_csv(path)
+    t = d["timestamp_utc"].astype(str).str.strip().str.replace(r"\s*UTC$", "", regex=True).str.rstrip("Z").str.replace("T", " ")
+    d["Time_UTC"] = pd.to_datetime(t)
+    return d
+
+
+@st.cache_data
+def load_model3():
+    path = find_file("model3_site_comparison.csv")
+    return pd.read_csv(path).set_index("site_id") if path else None
+
+
+def runs_table(times, flags, step_min: float, labels=("visible", "blackout")) -> pd.DataFrame:
+    """Consecutive runs of True/False as a table of windows."""
+    flags = np.asarray(flags).astype(bool)
+    if len(flags) == 0:
+        return pd.DataFrame(columns=["state", "start_utc", "end_utc", "hours"])
+    change = np.flatnonzero(flags[1:] != flags[:-1]) + 1
+    starts, ends = np.r_[0, change], np.r_[change, len(flags)]
+    times = pd.to_datetime(pd.Series(times)).reset_index(drop=True)
+    step = pd.Timedelta(minutes=step_min)
+    return pd.DataFrame({
+        "state": [labels[0] if flags[i] else labels[1] for i in starts],
+        "start_utc": [times[i] for i in starts],
+        "end_utc": [times[j - 1] + step for j in ends],
+        "hours": (ends - starts) * step_min / 60.0,
+    })
+
+
+@st.cache_data(show_spinner="Building the Model 1-3 scorecard...")
+def build_scorecard(earth_rule: str):
+    """One row per site: Model 1 (sun), Model 2 (DTE) and Model 3 (terrain) on a common time grid."""
+    m3, rows, window = load_model3(), [], ""
+    for name, s in SITES.items():
+        dte = load_dte(s["id"])
+        if dte is not None and len(dte) > 2:
+            n, step = len(dte), float((dte["Time_UTC"].iloc[1] - dte["Time_UTC"].iloc[0]).total_seconds() / 60)
+            start, source = dte["Time_UTC"].iloc[0].isoformat(), "Model 2 CSV (disc rule)"
+        else:
+            n, step, start = 12824, 10.0, "2026-10-15T00:00:00"
+            source = "live (" + earth_rule.split(" (")[0].lower() + ")"
+        g = compute_geometry_n(s["lat"], s["lon"], s.get("elev", 0.0), start, n, step)
+        mask = load_horizon(name)
+        sun = (g["Sun_Alt"] > horizon_at(mask, g["Sun_Az"].to_numpy())).to_numpy()
+        if dte is not None and len(dte) > 2:
+            earth = dte["earth_visible"].astype(bool).to_numpy()
+        else:
+            k = EARTH_RULES[earth_rule]
+            earth = ((g["Earth_Alt"] + k * g["Earth_Radius"]) > horizon_at(mask, g["Earth_Az"].to_numpy())).to_numpy()
+        window = f"{g['Time_UTC'].iloc[0]:%Y-%m-%d} to {g['Time_UTC'].iloc[-1]:%Y-%m-%d} UTC, {step:g}-minute steps ({n} samples)"
+        row = {
+            "Site": name,
+            "Sunlit %": round(100 * sun.mean(), 1),
+            "Longest sunlight (h)": round(longest_run_hours(sun, step), 1),
+            "Longest darkness (h)": round(longest_run_hours(~sun, step), 1),
+            "Earth visible %": round(100 * earth.mean(), 1),
+            "Longest DTE blackout (h)": round(longest_run_hours(~earth, step), 1),
+            "Sun AND Earth %": round(100 * (sun & earth).mean(), 1),
+            "Earth source": source,
+            "Horizon": "mask" if mask is not None else "flat (optimistic)",
+        }
+        if m3 is not None and s["id"] in m3.index:
+            r = m3.loc[s["id"]]
+            row.update({"Slope <= 5° (%)": round(float(r["pct_slope_le_5deg"]), 1),
+                        "Slope <= 10° (%)": round(float(r["pct_slope_le_10deg"]), 1),
+                        "Flat circle <= 10° (m)": round(float(r["largest_flat_circle_le_10deg_diameter_m"]), 0),
+                        "Relief 1 km (m)": round(float(r["relief_m"]), 0),
+                        "Terrain score (provisional)": round(float(r["terrain_score_provisional"]), 1),
+                        "Terrain rank (provisional)": int(r["terrain_rank_provisional"])})
+        rows.append(row)
+    return pd.DataFrame(rows), window
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +295,7 @@ def load_terrain(name: str):
 
 
 def hillshade(h: np.ndarray, mpp: float, az_deg: float = 315.0, alt_deg: float = 35.0) -> np.ndarray:
-    gy, gx = np.gradient(h.astype("float64"), mpp)        # rows run downward, so dz/dy(up) = -gy
+    gy, gx = np.gradient(h.astype("float64"), mpp)       # rows run downward, so dz/dy(up) = -gy
     n = np.dstack([-gx, gy, np.ones_like(gx)])
     n /= np.linalg.norm(n, axis=2, keepdims=True)
     az, alt = np.radians(az_deg), np.radians(alt_deg)
@@ -258,7 +361,7 @@ def panorama_figure(df: pd.DataFrame, i: int, mask, has_mask: bool) -> go.Figure
 
     # Current positions
     for label, azc, altc, color, size in [("Sun", "Sun_Az", "Sun_Alt", "#FFD700", 34),
-                                         ("Earth", "Earth_Az", "Earth_Alt", "#1E90FF", 24)]:
+                                          ("Earth", "Earth_Az", "Earth_Alt", "#1E90FF", 24)]:
         a, e = float(row[azc]), float(row[altc])
         visible = e > float(horizon_at(mask, np.array([a]))[0])
         fig.add_trace(go.Scatter(
@@ -287,7 +390,7 @@ def render_3d(df: pd.DataFrame, site_name: str, mask, has_mask: bool, step_min: 
     if not os.path.exists(path):
         st.error("viewer3d.html not found next to this file.")
         return
-    k = max(1, int(np.ceil(len(df) / 1500)))           # keep payload small
+    k = max(1, int(np.ceil(len(df) / 1500)))          # keep payload small
     d = df.iloc[::k]
     r = lambda a, n=3: [round(float(x), n) for x in a]
     payload = {
@@ -314,7 +417,6 @@ def render_3d(df: pd.DataFrame, site_name: str, mask, has_mask: bool, step_min: 
     html = open(path, encoding="utf-8").read().replace("__DATA__", json.dumps(payload))
     components.html(html, height=height, scrolling=False)
 
-
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
@@ -334,6 +436,12 @@ duration_hours = st.sidebar.slider("Window (hours)", 24, 2160, 2136, step=24,
 step_min = st.sidebar.select_slider("Time step (minutes)", options=[10, 15, 30, 60], value=60,
                                     help="Coarse steps can miss short illumination or darkness intervals.")
 
+earth_rule = st.sidebar.radio(
+    "Earth visibility rule", list(EARTH_RULES), index=0,
+    help="Earth is about 1.9 degrees wide in the lunar sky. Model 2 and NASA's Earth-visibility maps count Earth as visible "
+         "when ANY part of its disc is above the terrain horizon, which is optimistic for real radio links. "
+         "'Centre' and 'whole disc' are stricter.")
+
 if not chosen:
     st.info("Pick at least one site in the sidebar.")
     st.stop()
@@ -343,7 +451,7 @@ start_iso = datetime.combine(start_date, time(start_hour)).isoformat()
 results, summary_rows = {}, []
 try:
     for name in chosen:
-        df, has_mask = analyse(name, duration_hours, start_iso, step_min)
+        df, has_mask = analyse(name, duration_hours, start_iso, step_min, earth_rule)
         results[name] = (df, has_mask)
         row = {"Site": name, "Lat/Lon": f"{SITES[name]['lat']}, {SITES[name]['lon']}",
                "Terrain horizon": "mask loaded" if has_mask else "flat (optimistic)"}
@@ -365,11 +473,14 @@ team_path = find_file("site_comparison.csv")
 if team_path and start_iso == "2026-10-15T00:00:00" and duration_hours == 2136 and step_min == 60:
     team = pd.read_csv(team_path).set_index("site_id")
     ids = [SITES[n]["id"] for n in table["Site"]]
-    table["Team CSV sunlit %"] = [round(float(team.loc[i, "sun_visible_sample_percent"]), 1) if i in team.index else np.nan for i in ids]
-    table["Team CSV Earth %"] = [round(float(team.loc[i, "earth_visible_sample_percent"]), 1) if i in team.index else np.nan for i in ids]
-    st.caption("“Team CSV” columns come from the team's SPICE pipeline (89 days, hourly). Sunlit % should agree with the "
-               "app to within ~0.1 points. Team Earth % reads about 1-3 points HIGHER: the SPICE pipeline measures Earth from "
-               "the Moon's centre, not the site on the surface (lunar parallax, up to 0.28°). The app's live numbers use the surface site.")
+    table["Model 1 CSV sunlit %"] = [round(float(team.loc[i, "sun_visible_sample_percent"]), 1) if i in team.index else np.nan for i in ids]
+    notes = ["Model 1 CSV sunlit % (SPICE, hourly) should agree with the app to within ~0.1 points."]
+    if earth_rule == list(EARTH_RULES)[0]:
+        table["Model 2 CSV Earth %"] = [round(100 * float(load_dte(i)["earth_visible"].mean()), 1) if load_dte(i) is not None else np.nan for i in ids]
+        notes.append("Model 2 CSV Earth % uses the same disc rule and should agree to within ~0.2 points.")
+    else:
+        notes.append("Choose the 'any part of Earth's disc' rule in the sidebar to compare Earth % with Model 2.")
+    st.caption(" ".join(notes))
 st.dataframe(table.set_index("Site"), use_container_width=True)
 
 st.markdown("---")
@@ -384,7 +495,9 @@ c2.metric("Earth geometrically visible", f"{m['Earth visible %']:.1f}%")
 c3.metric("Longest darkness", f"{m['Longest darkness (h)']:.0f} h")
 c4.metric("Sun + Earth together", f"{m['Sun AND Earth %']:.1f}%")
 
-tab3d, tab1, tab2, tab3, tabT = st.tabs(["🌑 3D surface view", "Elevation vs time", "Sky view (azimuth / elevation)", "2D panorama", "⛰ Terrain suitability"])
+tab3d, tabS, tab1, tab2, tab3, tabD, tabT = st.tabs(["🌑 3D surface view", "📊 Scorecard (Models 1-3)", "Elevation vs time",
+                                                    "Sky view (azimuth / elevation)", "2D panorama",
+                                                    "📡 DTE windows (Model 2)", "⛰ Terrain suitability (Model 3)"])
 
 with tab3d:
     if tr is not None:
@@ -398,10 +511,75 @@ with tab3d:
     st.caption(" · ".join([
         f"**{focus}**",
         "terrain: ✅ loaded" if tr is not None else ("terrain: ❌ file not found in terrain/" if want_terrain
-                                                    else "terrain: none for this site (decorative flat ground)"),
+                                                      else "terrain: none for this site (decorative flat ground)"),
         f"horizon mask: ✅ {horizon_path(focus)}" if has_mask else "horizon mask: ❌ not found (flat 0° horizon)",
     ]))
     render_3d(df, focus, load_horizon(focus), has_mask, step_min, tr)
+
+with tabS:
+    sc, window_txt = build_scorecard(earth_rule)
+    st.markdown("All three models side by side, for **every** candidate site, on one common time window.")
+    st.dataframe(sc.set_index("Site"), use_container_width=True)
+    best = [("Most sunlight", "Sunlit %", True), ("Most Earth visibility", "Earth visible %", True),
+            ("Most time with Sun and Earth together", "Sun AND Earth %", True), ("Shortest DTE blackout", "Longest DTE blackout (h)", False)]
+    if "Slope <= 10° (%)" in sc.columns:
+        best.append(("Most gentle terrain (share of area <= 10°)", "Slope <= 10° (%)", True))
+    lines = []
+    for label, col, high in best:
+        j = sc[col].idxmax() if high else sc[col].idxmin()
+        lines.append(f"- **{label}:** {sc.loc[j, 'Site']} ({sc.loc[j, col]:g})")
+    st.markdown("\n".join(lines))
+    fig = go.Figure()
+    for col in ["Sunlit %", "Earth visible %", "Sun AND Earth %"]:
+        fig.add_bar(x=sc["Site"], y=sc[col], name=col)
+    fig.update_layout(template="plotly_dark", barmode="group", height=360, yaxis_title="% of time", margin=dict(t=20))
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        f"Window: {window_txt}. Sun: live Skyfield with the team's horizon masks (Model 1). Earth: Model 2 timelines where available "
+        "(rule: any part of Earth's disc). Terrain: Model 3, 1 km radius, 5 m cells. The terrain score and rank are PROVISIONAL - the "
+        "scoring formula is not documented in the CSV - and no overall winner is computed here on purpose: the sites trade off "
+        "sunlight, communications and terrain, and the weights are a mission decision. Horizon masks cover terrain out to ~9.5 km only.")
+
+with tabD:
+    s_ = SITES[focus]
+    dte = load_dte(s_["id"])
+    if dte is None:
+        st.info(f"No Model 2 timeline found for {s_['id']}. Put `{s_['id']}_dte_timeline.csv` in `data/dte/`.")
+    else:
+        step_d = float((dte["Time_UTC"].iloc[1] - dte["Time_UTC"].iloc[0]).total_seconds() / 60)
+        vis = dte["earth_visible"].astype(bool).to_numpy()
+        runs = runs_table(dte["Time_UTC"], vis, step_d)
+        black, seen = runs[runs["state"] == "blackout"], runs[runs["state"] == "visible"]
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Earth visible (Model 2)", f"{100 * vis.mean():.1f}%")
+        d2.metric("Longest visible run", f"{seen['hours'].max() if len(seen) else 0:.0f} h")
+        d3.metric("Longest blackout", f"{black['hours'].max() if len(black) else 0:.0f} h")
+        d4.metric("Blackout periods", f"{len(black)}")
+        figd = go.Figure()
+        figd.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Earth's upper edge at the terrain horizon")
+        figd.add_trace(go.Scatter(x=dte["Time_UTC"], y=dte["visibility_margin_deg"], mode="lines", name="Visibility margin",
+                                  line=dict(color="#1E90FF", width=1.5), fill="tozeroy", fillcolor="rgba(30,144,255,0.15)"))
+        figd.update_layout(template="plotly_dark", height=380, xaxis_title="Time (UTC)", margin=dict(t=20),
+                           yaxis_title="Margin above terrain horizon (deg); >0 = some part of Earth visible")
+        st.plotly_chart(figd, use_container_width=True)
+        st.markdown("**Communication windows and blackouts**")
+        show = runs.copy()
+        show["hours"] = show["hours"].round(1)
+        st.dataframe(show, use_container_width=True, height=300)
+        st.download_button("Download windows as CSV", show.to_csv(index=False).encode("utf-8"), f"{s_['id']}_dte_windows.csv", "text/csv")
+        with st.expander("Cross-check Model 2 against the live Skyfield calculation"):
+            g = compute_geometry_n(s_["lat"], s_["lon"], s_.get("elev", 0.0), dte["Time_UTC"].iloc[0].isoformat(), len(dte), step_d)
+            mk = load_horizon(focus)
+            live = ((g["Earth_Alt"] + g["Earth_Radius"]) > horizon_at(mk, g["Earth_Az"].to_numpy())).to_numpy()
+            x1, x2, x3 = st.columns(3)
+            x1.metric("Flag agreement", f"{100 * (live == vis).mean():.2f}%")
+            x2.metric("Mismatching samples", f"{int((live != vis).sum())}")
+            x3.metric("Max elevation difference", f"{np.abs(g['Earth_Alt'].to_numpy() - dte['earth_center_elevation_deg'].to_numpy()).max():.4f}°")
+            st.caption("The app recomputes Earth with Skyfield/DE421 and compares with Model 2's SPICE result. Elevation differences of a "
+                       "few thousandths of a degree and no flag mismatches are expected; run `validate_dte.py` for the full check.")
+        st.caption(f"Model 2: SPICE DE440, Earth measured from the site on the surface, {step_d:g}-minute steps. 'Visible' means any part of "
+                   "Earth's disc (about 0.95° radius) is above the terrain horizon - NASA's definition, optimistic for real radio links, which "
+                   "also need antenna pointing, link budget and a ground station. Use the sidebar rule to see stricter definitions elsewhere in the app.")
 
 with tab1:
     fig = go.Figure()
@@ -460,6 +638,25 @@ with tab3:
                    "Sun and Earth appear unobstructed whenever they are above it.")
 
 with tabT:
+    m3 = load_model3()
+    sid_ = SITES[focus]["id"]
+    if m3 is not None and sid_ in m3.index:
+        r3 = m3.loc[sid_]
+        st.markdown("**Model 3 terrain screening** - 1 km radius around the site, 5 m cells")
+        t1, t2, t3, t4, t5, t6 = st.columns(6)
+        t1.metric("Slope <= 5°", f"{r3['pct_slope_le_5deg']:.1f}%")
+        t2.metric("Slope <= 10°", f"{r3['pct_slope_le_10deg']:.1f}%")
+        t3.metric("Flat circle <= 5°", f"{r3['largest_flat_circle_le_5deg_diameter_m']:.0f} m")
+        t4.metric("Flat circle <= 10°", f"{r3['largest_flat_circle_le_10deg_diameter_m']:.0f} m")
+        t5.metric("Relief (1 km)", f"{r3['relief_m']:.0f} m")
+        t6.metric("Score (rank), provisional", f"{r3['terrain_score_provisional']:.1f} ({int(r3['terrain_rank_provisional'])}/4)")
+        st.caption("'Flat circle' is the diameter of the largest circle that fits entirely inside one connected area at or below that slope. "
+                   "Score and rank are provisional: the scoring formula is not documented in the CSV, so do not quote the rank until the "
+                   "weights are stated.")
+    else:
+        st.info("Model 3 CSV (model3_site_comparison.csv) not found - put it in `data/`.")
+    st.markdown("---")
+    st.markdown("**Slope map (LOLA cutout)**")
     if tr is None:
         st.info("No terrain product for this site yet. Run `preprocessing/make_terrain_products.py` for it, "
                 "put the output in `terrain/`, and add `\"terrain\": \"<name>\"` to the site in `SITES`.")
@@ -528,9 +725,9 @@ with st.expander("ℹ️ Model assumptions & scientific limitations", expanded=T
   (Skyfield). Kernel coverage: 1900-2050. Sites are treated as points on a spherical Moon surface.
 - **Terrain:** {"a horizon mask from `horizons/` is applied for this site." if has_mask else
   "**no terrain data is applied for this site**; a flat horizon is assumed, which overestimates sunlight and Earth visibility. A real result needs a DEM-derived horizon (e.g. from LOLA)."}
-- **Earth visibility is geometric only.** Earth counts as visible when its centre is above the horizon;
-  real links also depend on antenna, link budget, relays and ground stations.
+- **Earth visibility is geometric only.** Rule in use: **{earth_rule}**. Earth's disc is about 0.95° in radius, so the
+  rule changes results by a few points. Real links also depend on antenna, link budget, relays and ground stations.
 - **Sampling:** results use {step_min}-minute steps; short events can be missed.
 - **Not modelled:** observer height (rover mast/antenna), Sun's finite disc, thermal conditions, ice presence.
-- Site coordinates are approximate and should be verified against a cited source.
+- Site coordinates and elevations come from the team's CSV files. Horizon masks cover terrain out to about 9.5 km only.
 """)
