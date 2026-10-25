@@ -1,0 +1,5 @@
+site_id,site_name,lat_deg,lon_deg,footprint_radius_m,cell_size_m,n_valid_pixels,valid_area_km2,coverage_pct,mean_slope_deg,median_slope_deg,p90_slope_deg,pct_slope_le_5deg,pct_slope_le_10deg,pct_slope_gt_10deg,pct_slope_gt_15deg,largest_flat_patch_le_5deg_m2,largest_flat_circle_le_5deg_diameter_m,largest_flat_patch_le_10deg_m2,largest_flat_circle_le_10deg_diameter_m,relief_m,site_elevation_m,terrain_score_provisional,terrain_rank_provisional,notes
+LM1,Shackleton Rim B,-89.5244,56.30993,1000,5.0,125660,3.142,99.997,13.819,13.905,18.023,0.512,12.572,87.428,36.549,2225.0,26.623,141025.0,112.047,489.799,-27.785,5.336,4,
+Site06,Nobile Rim 1,-85.4381,37.36667,1000,5.0,125676,3.142,100.01,12.676,13.468,19.108,11.081,29.248,70.752,36.624,280200.0,126.529,858400.0,328.766,408.406,5946.128,18.348,3,
+Site20,Leibnitz Beta Plateau,-85.4266,31.74276,1000,5.0,125668,3.142,100.003,8.097,7.357,14.217,21.626,74.929,25.071,8.261,206300.0,129.536,2300450.0,337.345,224.334,6398.175,42.947,1,
+Site23,Malapert Massif,-85.9948,-0.23578,1000,5.0,125656,3.141,99.994,8.705,7.913,15.347,24.013,63.739,36.261,11.232,294875.0,125.0,1842400.0,261.271,278.57,4783.629,39.904,2,
